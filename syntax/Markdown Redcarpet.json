@@ -20,6 +20,7 @@
                 {"include" : "#fenced_block_css"},
                 {"include" : "#fenced_block_scss"},
                 {"include" : "#fenced_block_js"},
+                {"include" : "#fenced_block_latex"},
                 {"include" : "#link-def"},
                 {"include" : "#html"},
                 {"include" : "#paragraph"}
@@ -112,6 +113,14 @@
                     "patterns" : [
                         {"include" : "source.js"}
                     ]
+                },
+                "fenced_block_latex" : {
+                    "begin" : "(^|\\G)([`]{3})\\{*[ ]*(?:latex).*\\}*$",
+                    "end" : "(^|\\G)([`]{3})($|\\z)",
+                    "name" : "meta.embedded.block.latex",
+                    "patterns" : [
+                        {"include" : "text.tex.latex"}
+                    ]
                 }
             }
         },
@@ -140,13 +149,13 @@
                     ]
                 },
                 "code-inline-latex" : {
-                    "begin" : "([\\$|\\$\\$])",
+                    "begin" : "((^|[ ]+)[\\$])",
                     "beginCaptures" : {
                         "1" : {
                             "name" : "punctuation.definition.raw.rmarkdown"
                         }
                     },
-                    "end" : "([\\$|\\$$])",
+                    "end" : "([\\$]([ ]+|$))",
                     "endCaptures" : {
                             "1" : {
                             "name" : "punctuation.definition.raw.rmarkdown"
@@ -154,7 +163,7 @@
                     },
                     "contentName" : "meta.embedded.block.latex",
                     "patterns" : [
-                        {"include" : "source.latex"}
+                        {"include" : "text.tex.latex"}
                     ]
                 }
             }
