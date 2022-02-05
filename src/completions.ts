@@ -10,6 +10,9 @@ import * as vscode from 'vscode';
 import * as session from './session';
 import { extendSelection } from './selection';
 import { cleanLine } from './lineCache';
+import { globalRHelp } from './extension';
+import { config } from './util';
+import { getChunks } from './rmarkdown';
 
 
 // Get with names(roxygen2:::default_tags())
@@ -28,14 +31,73 @@ const roxygenTagCompletionItems = [
 
 export class HoverProvider implements vscode.HoverProvider {
     provideHover(document: vscode.TextDocument, position: vscode.Position): vscode.Hover {
+        if(!session.globalenv){
+            return null;
+        }
+
+        if (document.languageId === 'rmd') {
+            const chunks = getChunks(document);
+            const chunk = chunks.find((chunk) => chunk.language === 'r' && chunk.startLine < position.line && chunk.endLine > position.line);
+            if (!chunk) {
+                return null;
+            }
+        }
+
         const wordRange = document.getWordRangeAtPosition(position);
         const text = document.getText(wordRange);
-        return new vscode.Hover(`\`\`\`\n${session.globalenv[text].str}\n\`\`\``);
+        // use juggling check here for both
+        // null and undefined
+        // eslint-disable-next-line eqeqeq
+        if (session.globalenv[text]?.str == null) {
+            return null;
+        }
+        return new vscode.Hover(`\`\`\`\n${session.globalenv[text]?.str}\n\`\`\``);
     }
 }
 
+export class HelpLinkHoverProvider implements vscode.HoverProvider {
+    async provideHover(document: vscode.TextDocument, position: vscode.Position): Promise<vscode.Hover> {
+        if(!config().get<boolean>('helpPanel.enableHoverLinks')){
+            return null;
+        }
+
+        if (document.languageId === 'rmd') {
+            const chunks = getChunks(document);
+            const chunk = chunks.find((chunk) => chunk.language === 'r' && chunk.startLine < position.line && chunk.endLine > position.line);
+            if (!chunk) {
+                return null;
+            }
+        }
+
+        const re = /([a-zA-Z0-9._:])+/;
+        const wordRange = document.getWordRangeAtPosition(position, re);
+        const token = document.getText(wordRange);
+        const aliases = await globalRHelp?.getMatchingAliases(token) || [];
+        const mds = aliases.map(a => {
+            const cmdText = `${a.package}::${a.name}`;
+            const args = [`/library/${a.package}/html/${a.alias}.html`];
+            const encodedArgs = encodeURIComponent(JSON.stringify(args));
+            const cmd = 'command:r.helpPanel.openForPath';
+            const cmdUri = vscode.Uri.parse(`${cmd}?${encodedArgs}`);
+            return `[\`${cmdText}\`](${cmdUri})`;
+        });
+        const md = new vscode.MarkdownString(mds.join('  \n'));
+        md.isTrusted = true;
+        return new vscode.Hover(md, wordRange);
+    }
+}
+
+
 export class StaticCompletionItemProvider implements vscode.CompletionItemProvider {
     provideCompletionItems(document: vscode.TextDocument, position: vscode.Position): vscode.CompletionItem[] | undefined {
+        if (document.languageId === 'rmd') {
+            const chunks = getChunks(document);
+            const chunk = chunks.find((chunk) => chunk.language === 'r' && chunk.startLine < position.line && chunk.endLine > position.line);
+            if (!chunk) {
+                return undefined;
+            }
+        }
+
         if (document.lineAt(position).text
                     .substr(0, 2) === '#\'') {
             return roxygenTagCompletionItems;
@@ -58,10 +120,18 @@ export class LiveCompletionItemProvider implements vscode.CompletionItemProvider
             return items;
         }
 
+        if (document.languageId === 'rmd') {
+            const chunks = getChunks(document);
+            const chunk = chunks.find((chunk) => chunk.language === 'r' && chunk.startLine < position.line && chunk.endLine > position.line);
+            if (!chunk) {
+                return items;
+            }
+        }
+
         const trigger = completionContext.triggerCharacter;
 
         if (trigger === undefined) {
-            Object.keys(session.globalenv).map((key) => {
+            Object.keys(session.globalenv).forEach((key) => {
                 const obj = session.globalenv[key];
                 const item = new vscode.CompletionItem(
                     key,
@@ -79,36 +149,44 @@ export class LiveCompletionItemProvider implements vscode.CompletionItemProvider
             const symbol = document.getText(symbolRange);
             const doc = new vscode.MarkdownString('Element of `' + symbol + '`');
             const obj = session.globalenv[symbol];
-            let elements: string[];
+            let names: string[];
             if (obj !== undefined) {
                 if (completionContext.triggerCharacter === '$') {
-                    elements = obj.names;
+                    names = obj.names;
                 } else if (completionContext.triggerCharacter === '@') {
-                    elements = obj.slots;
+                    names = obj.slots;
                 }
             }
-            elements.map((key) => {
-                const item = new vscode.CompletionItem(key, vscode.CompletionItemKind.Field);
-                item.detail = '[session]';
-                item.documentation = doc;
-                items.push(item);
-            });
+
+            if (names) {
+                items.push(...getCompletionItems(names, vscode.CompletionItemKind.Field, '[session]', doc));
+            }
         }
 
         if (trigger === undefined || trigger === '[' || trigger === ',' || trigger === '"' || trigger === '\'') {
-            const bracketItems = getBracketCompletionItems(document, position, token);
-            items.push(...bracketItems);
+            items.push(...getBracketCompletionItems(document, position, token));
         }
 
         if (trigger === undefined || trigger === '(' || trigger === ',') {
-            const pipelineItems = getPipelineCompletionItems(document, position, token);
-            items.push(...pipelineItems);
+            items.push(...getPipelineCompletionItems(document, position, token));
         }
 
         return items;
     }
 }
 
+function getCompletionItems(names: string[], kind: vscode.CompletionItemKind, detail: string, documentation: vscode.MarkdownString): vscode.CompletionItem[] {
+    const len = names.length.toString().length;
+    let index = 0;
+    return names.map((name) => {
+        const item = new vscode.CompletionItem(name, kind);
+        item.detail = detail;
+        item.documentation = documentation;
+        item.sortText = `0-${index.toString().padStart(len, '0')}`;
+        index++;
+        return item;
+    });
+}
 
 function getBracketCompletionItems(document: vscode.TextDocument, position: vscode.Position, token: vscode.CancellationToken) {
     const items: vscode.CompletionItem[] = [];
@@ -146,12 +224,7 @@ function getBracketCompletionItems(document: vscode.TextDocument, position: vsco
         const obj = session.globalenv[symbol];
         if (obj !== undefined && obj.names !== undefined) {
             const doc = new vscode.MarkdownString('Element of `' + symbol + '`');
-            obj.names.map((name: string) => {
-                const item = new vscode.CompletionItem(name, vscode.CompletionItemKind.Field);
-                item.detail = '[session]';
-                item.documentation = doc;
-                items.push(item);
-            });
+            items.push(...getCompletionItems(obj.names, vscode.CompletionItemKind.Field, '[session]', doc));
         }
     }
     return items;
@@ -171,7 +244,7 @@ function getPipelineCompletionItems(document: vscode.TextDocument, position: vsc
         if (line.isEmptyOrWhitespace) {
             continue;
         }
-        
+
         const cleanedLine = cleanLine(line.text);
         if (cleanedLine.length === 0) {
             continue;
@@ -191,17 +264,12 @@ function getPipelineCompletionItems(document: vscode.TextDocument, position: vsc
 
         break;
     }
-    
+
     if (!token.isCancellationRequested && symbol !== undefined) {
         const obj = session.globalenv[symbol];
         if (obj !== undefined && obj.names !== undefined) {
             const doc = new vscode.MarkdownString('Element of `' + symbol + '`');
-            obj.names.map((name: string) => {
-                const item = new vscode.CompletionItem(name, vscode.CompletionItemKind.Field);
-                item.detail = '[session]';
-                item.documentation = doc;
-                items.push(item);
-            });
+            items.push(...getCompletionItems(obj.names, vscode.CompletionItemKind.Field, '[session]', doc));
         }
     }
     return items;

@@ -79,7 +79,7 @@ export async function dispatchRStudioAPICall(action: string, args: any, sd: stri
       break;
     }
     case 'send_to_console': {
-      await sendCodeToRTerminal(args.code, args.focus);
+      await sendCodeToRTerminal(args.code, args.execute, args.focus);
       await writeSuccessResponse(sd);
       break;
     }
@@ -242,7 +242,7 @@ export function projectPath(): { path: string; } {
     }
   }
 
-  // if we got to here either: 
+  // if we got to here either:
   //   - the workspaceFolders array was undefined (no folder open)
   //   - the activeText editor was an unsaved document, which has undefined workspace folder.
   // return undefined and handle with a message in R.
@@ -317,10 +317,12 @@ export function purgeAddinPickerItems(): void {
 export async function launchAddinPicker(): Promise<void> {
 
   if (!config().get<boolean>('sessionWatcher')) {
-    throw ('{rstudioapi} emulation requires session watcher to be enabled in extension config.');
+    void window.showErrorMessage('{rstudioapi} emulation requires session watcher to be enabled in extension config.');
+    return;
   }
   if (!sessionDirectoryExists()) {
-    throw ('No active R terminal session, attach one to use RStudio addins.');
+    void window.showErrorMessage('No active R terminal session, attach one to use RStudio addins.');
+    return;
   }
 
   const addinPickerOptions: QuickPickOptions = {
@@ -339,12 +341,19 @@ export async function launchAddinPicker(): Promise<void> {
   }
 }
 
-export async function sendCodeToRTerminal(code: string, focus: boolean) {
-  console.info(`[sendCodeToRTerminal] inserting code: ${code}`);
-  await runTextInTerm(code);
+export async function sendCodeToRTerminal(code: string, execute: boolean, focus: boolean) {
+  if (execute) {
+    console.info(`[sendCodeToRTerminal] sending code: ${code}`);
+  } else {
+    console.info(`[sendCodeToRTerminal] inserting code: ${code}`);
+  }
+
+  await runTextInTerm(code, execute);
   if (focus) {
     const rTerm = await chooseTerminal();
-    rTerm.show();
+    if (rTerm !== undefined) {
+      rTerm.show();
+    }
   }
 }
 
@@ -417,7 +426,7 @@ function normaliseEditText(text: string, editLocation: any,
 }
 
 // window.onActiveTextEditorDidChange handler
-export function trackLastActiveTextEditor(editor: TextEditor): void {
+export function trackLastActiveTextEditor(editor?: TextEditor): void {
   if (typeof editor !== 'undefined') {
     lastActiveTextEditor = editor;
   }
