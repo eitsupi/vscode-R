@@ -46,16 +46,19 @@ bundled installation fails.
 
 > [!NOTE]
 >
-> ### Known limitation: isolated libraries
+> ### Isolated libraries
 >
 > A vscode-R-managed `sess` copy is reused across projects. Dependencies found in
 > ordinary R libraries during initial preparation are not copied into that managed
-> library. If an isolated project's `.libPaths()` cannot see them, `sess` may fail
-> to load; R still starts, but its session watcher is unavailable.
+> library. If an isolated project's `.libPaths()` cannot see them, the R terminal
+> lists the missing packages and the extension asks before installing them into the
+> managed library. Declining leaves R running without the session watcher.
 >
-> In the affected project, install the missing dependencies with
-> [renv::install()](https://pkgs.rstudio.com/renv/reference/install.html). Then
-> restart R or retry manual attach. You do not need to install `sess` in the project.
+> To keep them in the project instead, install the missing dependencies with the
+> project's package manager, for example
+> [renv::install()](https://pkgs.rstudio.com/renv/reference/install.html) or
+> `pixi add r-jsonlite r-later r-processx r-rstudioapi`. Then restart R or retry
+> manual attach. You do not need to install `sess` in the project.
 >
 > renv's default `implicit` snapshot type includes packages detected in project
 > files, so editor-only dependencies may be omitted; see
