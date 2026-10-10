@@ -65,14 +65,35 @@ sess_loaded_source_revision <- function() {
     sess_source_revision(file.path(path, "DESCRIPTION"))
 }
 
-sess_load_namespace <- function(library, revision, normal_libraries = .libPaths()) {
-    paths <- unique(c(library, normal_libraries))
-    support_paths <- unique(c(normal_libraries, library))
+sess_imports <- function(library) {
     description <- read.dcf(file.path(library, "sess", "DESCRIPTION"))
-    imports <- if ("Imports" %in% colnames(description)) {
+    if ("Imports" %in% colnames(description)) {
         trimws(gsub("\\s*\\(.*\\)", "", unlist(strsplit(description[1L, "Imports"], ","))))
     } else {
         character()
+    }
+}
+
+# Imports, plus ps for processx's .onLoad, that neither the normal libraries nor
+# the managed library provide to this R.
+sess_missing_dependencies <- function(library, normal_libraries = .libPaths()) {
+    support_paths <- unique(c(normal_libraries, library))
+    imports <- sess_imports(library)
+    required <- unique(c(imports, if ("processx" %in% imports) "ps"))
+    found <- vapply(required, function(package) {
+        nzchar(system.file(package = package, lib.loc = support_paths))
+    }, FALSE)
+    required[!found]
+}
+
+sess_load_namespace <- function(library, revision, normal_libraries = .libPaths()) {
+    paths <- unique(c(library, normal_libraries))
+    support_paths <- unique(c(normal_libraries, library))
+    imports <- sess_imports(library)
+    missing <- sess_missing_dependencies(library, normal_libraries)
+    if (length(missing)) {
+        stop("sess needs R packages that this R cannot find: ", paste(missing, collapse = ", "),
+             ". Install them with the project's package manager, then restart R.")
     }
     # processx may load ps during .onLoad. Load it first so dependencies found
     # only in the managed library remain visible without changing .libPaths().

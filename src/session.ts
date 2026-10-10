@@ -1037,10 +1037,12 @@ async function ensureAttachSessConsentService(): Promise<string> {
                 await Promise.resolve(extensionContext.globalState.update(SESS_INSTALL_PROMPT_DISMISSED_REVISION, revision));
             },
             prompt: async request => {
-                const mismatch = request.reason === 'mismatch';
-                const message = mismatch
-                    ? 'The installed sess does not match this build of vscode-R. Install the bundled copy in a vscode-R-managed library? Your existing sess installation will not be modified. “Don’t ask again” applies to this bundled sess revision.'
-                    : 'vscode-R needs bundled sess to attach the session watcher. Install it in a vscode-R-managed library? Your existing sess installation will not be modified. “Don’t ask again” applies to this bundled sess revision.';
+                const messages: Record<typeof request.reason, string> = {
+                    mismatch: 'The installed sess does not match this build of vscode-R. Install the bundled copy in a vscode-R-managed library? Your existing sess installation will not be modified. “Don’t ask again” applies to this bundled sess revision.',
+                    missing: 'vscode-R needs bundled sess to attach the session watcher. Install it in a vscode-R-managed library? Your existing sess installation will not be modified. “Don’t ask again” applies to this bundled sess revision.',
+                    dependencies: 'This R cannot find some R packages that vscode-R’s managed sess needs (listed in the R terminal). Install them in the vscode-R-managed library? Your project libraries will not be modified. “Don’t ask again” applies to this bundled sess revision.',
+                };
+                const message = messages[request.reason];
                 const choice = await window.showWarningMessage(
                     message, 'Install bundled sess', 'Not now', "Don't ask again");
                 const choices: Record<string, SessConsentChoice> = {

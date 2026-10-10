@@ -2,7 +2,7 @@ import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { SessConsentChoice, SessConsentService } from '../../sessConsent';
+import { SessConsentChoice, SessConsentReason, SessConsentService } from '../../sessConsent';
 
 const revision = `git-tree:${'a'.repeat(40)}`;
 const nextRevision = `git-tree:${'c'.repeat(40)}`;
@@ -16,7 +16,7 @@ async function waitForFile(file: string): Promise<string> {
     throw new Error(`Timed out waiting for ${file}`);
 }
 
-async function writeRequest(directory: string, id: string, reason: 'missing' | 'mismatch' = 'missing',
+async function writeRequest(directory: string, id: string, reason: string = 'missing',
     requestRevision = revision): Promise<void> {
     await fs.writeFile(path.join(directory, `${id}.request`),
         `vscode-r-sess-consent-v1\n${id}\n${requestRevision}\nlinux-x86_64|4.5\n${reason}\n`);
@@ -39,7 +39,7 @@ suite('sess install consent bridge', () => {
         await fs.rm(directory, { recursive: true, force: true });
     });
 
-    function service(prompt: (request: { reason: 'missing' | 'mismatch' }) => Promise<'install' | 'notNow' | 'dontAskAgain' | 'dismiss'>,
+    function service(prompt: (request: { reason: SessConsentReason }) => Promise<'install' | 'notNow' | 'dontAskAgain' | 'dismiss'>,
         isEnabled = () => true,
         expectedRevision = revision): SessConsentService {
         const result = new SessConsentService({
@@ -57,7 +57,7 @@ suite('sess install consent bridge', () => {
 
     test('writes a fresh approval only after the prompt accepts', async () => {
         const id = '1'.repeat(32);
-        const prompt = (request: { reason: 'missing' | 'mismatch' }) => {
+        const prompt = (request: { reason: SessConsentReason }) => {
             assert.strictEqual(request.reason, 'missing');
             return Promise.resolve<SessConsentChoice>('install');
         };
@@ -66,6 +66,26 @@ suite('sess install consent bridge', () => {
         await writeRequest(directory, id);
         assert.strictEqual(await waitForFile(path.join(directory, `${id}.response`)), 'approve\n');
         assert.strictEqual(dismissedRevision, undefined);
+    });
+
+    test('passes a missing-dependencies request to the prompt', async () => {
+        const id = 'd'.repeat(32);
+        const reasons: SessConsentReason[] = [];
+        const broker = service(request => { reasons.push(request.reason); return Promise.resolve('install'); });
+        await broker.start();
+        await writeRequest(directory, id, 'dependencies');
+        assert.strictEqual(await waitForFile(path.join(directory, `${id}.response`)), 'approve\n');
+        assert.deepStrictEqual(reasons, ['dependencies']);
+    });
+
+    test('declines an unknown reason without prompting', async () => {
+        let prompts = 0;
+        const broker = service(() => { prompts++; return Promise.resolve('install'); });
+        await broker.start();
+        const id = 'e'.repeat(32);
+        await writeRequest(directory, id, 'upgrade');
+        assert.strictEqual(await waitForFile(path.join(directory, `${id}.response`)), 'decline\n');
+        assert.strictEqual(prompts, 0);
     });
 
     test('accepts the CRLF lines written by base R on Windows', async () => {

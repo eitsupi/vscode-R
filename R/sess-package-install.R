@@ -33,21 +33,42 @@ sess_verify_package <- function(library, required, expected_revision, interactiv
     if (!identical(as.integer(status), 0L)) stop("The installed sess package failed its compatibility/load check.")
 }
 
+# Pass the caller's library search path to installation/verification children,
+# including project libraries, without sourcing the caller's startup profile.
+sess_set_install_environment <- function(library) {
+    previous <- Sys.getenv(c("R_LIBS", "R_PROFILE_USER", "R_ENVIRON_USER"),
+                           unset = NA_character_, names = TRUE)
+    Sys.setenv(R_LIBS = paste(unique(c(library, .libPaths())), collapse = .Platform$path.sep),
+               R_PROFILE_USER = "", R_ENVIRON_USER = "")
+    previous
+}
+
+sess_restore_install_environment <- function(previous) {
+    Sys.unsetenv(names(previous)[is.na(previous)])
+    if (any(!is.na(previous))) do.call(Sys.setenv, as.list(previous[!is.na(previous)]))
+}
+
+# Install only the given dependencies beside an already prepared managed sess.
+sess_install_missing_dependencies <- function(packages, library, repos) {
+    previous <- sess_set_install_environment(library)
+    on.exit(sess_restore_install_environment(previous), add = TRUE)
+    sess_install_dependencies(packages, library, repos)
+    still_missing <- packages[!nzchar(vapply(packages, function(package) {
+        system.file(package = package, lib.loc = unique(c(.libPaths(), library)))
+    }, ""))]
+    if (length(still_missing)) {
+        stop("Could not install: ", paste(still_missing, collapse = ", "))
+    }
+    invisible(TRUE)
+}
+
 sess_install <- function(pkg_path, library, repos, interactive = FALSE) {
     description <- read.dcf(file.path(pkg_path, "DESCRIPTION"))
     required <- description[1L, "Version"]
     expected_revision <- description[1L, "Config/vscode-R/source-revision"]
 
-    # Pass the caller's library search path to installation/verification children,
-    # including project libraries, without sourcing the caller's startup profile.
-    keys <- c("R_LIBS", "R_PROFILE_USER", "R_ENVIRON_USER")
-    previous <- Sys.getenv(keys, unset = NA_character_, names = TRUE)
-    on.exit({
-        Sys.unsetenv(keys[is.na(previous)])
-        if (any(!is.na(previous))) do.call(Sys.setenv, as.list(previous[!is.na(previous)]))
-    }, add = TRUE)
-    Sys.setenv(R_LIBS = paste(unique(c(library, .libPaths())), collapse = .Platform$path.sep),
-               R_PROFILE_USER = "", R_ENVIRON_USER = "")
+    previous <- sess_set_install_environment(library)
+    on.exit(sess_restore_install_environment(previous), add = TRUE)
 
     deps <- if ("Imports" %in% colnames(description)) description[1L, "Imports"] else ""
     deps <- trimws(gsub("\\s*\\(.*\\)", "", unlist(strsplit(deps, ","))))

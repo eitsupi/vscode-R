@@ -3,7 +3,8 @@ import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 
-export type SessConsentReason = 'missing' | 'mismatch';
+export type SessConsentReason = 'missing' | 'mismatch' | 'dependencies';
+const REASONS: readonly string[] = ['missing', 'mismatch', 'dependencies'];
 
 export interface SessConsentRequest {
     id: string;
@@ -132,10 +133,10 @@ export class SessConsentService {
         const lines = normalized.slice(0, -1).split('\n');
         if (lines.length !== 5 || lines[0] !== 'vscode-r-sess-consent-v1' || lines[1] !== id
             || !REVISION.test(lines[2]) || !RUNTIME.test(lines[3])
-            || (lines[4] !== 'missing' && lines[4] !== 'mismatch')) {
+            || !REASONS.includes(lines[4])) {
             throw new Error('Malformed sess consent request.');
         }
-        return { id, revision: lines[2], runtime: lines[3], reason: lines[4] };
+        return { id, revision: lines[2], runtime: lines[3], reason: lines[4] as SessConsentReason };
     }
 
     private async readBoundedRequest(filePath: string): Promise<string> {

@@ -34,6 +34,35 @@ writeLines(c(
 writeLines(c("export(connect)", "export(notify_client)", "export(request_client)"),
            file.path(pkg, "NAMESPACE"))
 
+# A managed copy prepared where its Imports were visible, reused by an R that cannot see them.
+dependency <- file.path(root, "dependency source", "sessfixturedep")
+dir.create(file.path(dependency, "R"), recursive = TRUE)
+writeLines(c(
+    "Package: sessfixturedep", "Version: 1.0.0", "Title: Dependency Fixture",
+    "Description: A local dependency fixture.", "License: MIT",
+    "Author: Test Author", "Maintainer: Test Author <test@example.com>"
+), file.path(dependency, "DESCRIPTION"))
+writeLines("fixture_value <- function() 1L", file.path(dependency, "R", "dep.R"))
+writeLines("export(fixture_value)", file.path(dependency, "NAMESPACE"))
+dependency_contrib <- file.path(root, "dependency repo", "src", "contrib")
+dir.create(dependency_contrib, recursive = TRUE)
+previous_directory <- setwd(dirname(dependency))
+tryCatch(
+    utils::tar(file.path(dependency_contrib, "sessfixturedep_1.0.0.tar.gz"),
+               "sessfixturedep", compression = "gzip", tar = "internal"),
+    finally = setwd(previous_directory))
+tools::write_PACKAGES(dependency_contrib, type = "source")
+dependency_repo <- paste0("file://", if (.Platform$OS.type == "windows") "/",
+                          normalizePath(file.path(root, "dependency repo"), winslash = "/"))
+pkg_with_dependency <- file.path(root, "bundled with dependency", "sess")
+dir.create(dirname(pkg_with_dependency))
+file.copy(pkg, dirname(pkg_with_dependency), recursive = TRUE)
+dependency_description <- read.dcf(file.path(pkg_with_dependency, "DESCRIPTION"))
+write.dcf(cbind(dependency_description, Imports = "sessfixturedep"),
+          file.path(pkg_with_dependency, "DESCRIPTION"))
+cat("import(sessfixturedep)\n", file = file.path(pkg_with_dependency, "NAMESPACE"), append = TRUE)
+dependency_modes <- c("dependencies_approve", "dependencies_decline")
+
 runner <- file.path(root, "run-case.R")
 writeLines(c(
     "args <- commandArgs(TRUE)",
@@ -301,6 +330,23 @@ writeLines(c(
     "    stopifnot(!file.exists(ready_path))",
     "    stopifnot(same_paths(.libPaths(), ordinary))",
     "  }",
+    "} else if (mode %in% c('dependencies_approve', 'dependencies_decline')) {",
+    "  # The local fixture repository has only a source index.",
+    "  options(repos=c(CRAN=Sys.getenv('VSCODE_R_TEST_DEPENDENCY_REPO')), pkgType='source')",
+    "  stopifnot(!nzchar(system.file(package='sessfixturedep')))",
+    "  result <- attach_sess(timeout=20)",
+    "  stopifnot(same_paths(.libPaths(), ordinary))",
+    "  stopifnot(identical(readLines(ready_path), revision))",
+    "  stopifnot(!dir.exists(file.path(normal, 'sessfixturedep')))",
+    "  if (mode == 'dependencies_approve') {",
+    "    stopifnot(identical(result, TRUE), identical(sess_loaded_source_revision(), revision))",
+    "    actual <- getNamespaceInfo(asNamespace('sess'), 'path')",
+    "    stopifnot(same_paths(actual, file.path(managed_library, 'sess')))",
+    "    stopifnot(file.exists(file.path(managed_library, 'sessfixturedep', 'DESCRIPTION')))",
+    "  } else {",
+    "    stopifnot(identical(result, FALSE), !('sess' %in% loadedNamespaces()))",
+    "    stopifnot(!dir.exists(file.path(managed_library, 'sessfixturedep')))",
+    "  }",
     "} else if (mode == 'lock_timeout') {",
     "  lock <- file.path(dirname(managed_library), '.setup-lock')",
     "  lock_marker <- file.path(lock, 'foreign-owner')",
@@ -334,7 +380,8 @@ writeLines(c(
     "  inherited <- vscode_r_startup_existing('endpoint')",
     "  if (!is.null(inherited)) stop('child reused the parent startup context')",
     "}",
-    "ids <- character(); identities <- character(); deadline <- Sys.time() + 30",
+    "ids <- character(); identities <- character(); reasons <- character()",
+    "deadline <- Sys.time() + 30",
     "while (length(ids) < count && Sys.time() < deadline) {",
     "  requests <- list.files(directory, pattern='\\\\.request$', full.names=TRUE)",
     "  for (request in requests) {",
@@ -343,7 +390,7 @@ writeLines(c(
     "    id <- lines[[2L]]; if (id %in% ids) next",
     "    if (nzchar(wait_marker) && !file.exists(wait_marker)) next",
     "    ids <- c(ids, id); temporary <- tempfile(tmpdir=directory)",
-    "    identities <- c(identities, lines[[4L]])",
+    "    identities <- c(identities, lines[[4L]]); reasons <- c(reasons, lines[[5L]])",
     "    answer <- answers[[min(length(ids), length(answers))]]",
     "    writeLines(answer, temporary)",
     "    response <- file.path(directory, paste0(id, '.response'))",
@@ -354,6 +401,7 @@ writeLines(c(
     "if (length(ids) != count) stop('timed out waiting for consent requests')",
     "writeLines(ids, log)",
     "writeLines(identities, identity_log)",
+    "writeLines(reasons, paste0(identity_log, '.reasons'))",
     "writeLines('ok', status_log)",
     "}, error=function(e) {",
     "writeLines(paste0('error: ', conditionMessage(e)), status_log)",
@@ -444,14 +492,31 @@ run_case <- function(mode) {
         }, add = TRUE)
         do.call(Sys.setenv, as.list(profile_environment))
     }
-    consent_modes <- c("markers", "mismatch", "profile_decline", "profile_approve")
+    package <- if (mode %in% dependency_modes) pkg_with_dependency else pkg
+    if (mode %in% dependency_modes) {
+        other_project <- file.path(case_root, "other project library")
+        managed_library <- sess_managed_library(file.path(case_root, "vscode-R"), revision)
+        dir.create(other_project)
+        dir.create(managed_library, recursive = TRUE)
+        utils::install.packages("sessfixturedep", repos = dependency_repo, type = "source",
+                                lib = other_project, quiet = TRUE)
+        previous_libraries <- .libPaths()
+        .libPaths(c(other_project, previous_libraries))
+        utils::install.packages(package, repos = NULL, type = "source", lib = managed_library,
+                                quiet = TRUE)
+        .libPaths(previous_libraries)
+        writeLines(revision, file.path(dirname(managed_library), ".ready"))
+        Sys.setenv(VSCODE_R_TEST_DEPENDENCY_REPO = dependency_repo)
+        on.exit(Sys.unsetenv("VSCODE_R_TEST_DEPENDENCY_REPO"), add = TRUE)
+    }
+    consent_modes <- c("markers", "mismatch", "profile_decline", "profile_approve", dependency_modes)
     if (mode %in% consent_modes) {
         log <- file.path(case_root, "consent-ids")
         identity_log <- file.path(case_root, "runtime-identities")
         status_log <- file.path(case_root, "consent-agent-status")
         count <- if (mode %in% c("markers", "profile_decline")) 2L else 1L
         answer <- switch(mode, profile_approve = "approve", profile_decline = "decline,approve",
-                         "decline")
+                         dependencies_approve = "approve", "decline")
         release_marker <- if (mode %in% c("profile_decline", "profile_approve")) {
             file.path(case_root, "release-profile-consent")
         } else {
@@ -516,7 +581,7 @@ run_case <- function(mode) {
                 r_binary,
                 shQuote(c(
                     flags,
-                    paste0("--file=", runner), "--args", mode, case_root, pkg, revision, mismatch,
+                    paste0("--file=", runner), "--args", mode, case_root, package, revision, mismatch,
                     "", ""
                 )),
                 stdout = TRUE,
@@ -547,11 +612,14 @@ run_case <- function(mode) {
                                   paste(R.version$major, minor, sep = "."), sep = "|")
         stopifnot(length(runtime_identity) == expected_count)
         stopifnot(all(runtime_identity == expected_runtime))
+        reasons <- readLines(paste0(identity_log, ".reasons"), warn = FALSE)
+        if (mode %in% dependency_modes) stopifnot(identical(reasons, "dependencies"))
     }
 }
 
 for (mode in c(
-    "mismatch", "exact", "prepared", "markers", "profile_exact", "profile_decline", "profile_approve"
+    "mismatch", "exact", "prepared", "markers", "profile_exact", "profile_decline", "profile_approve",
+    dependency_modes
 )) run_case(mode)
 
 wait_for_file <- function(path, seconds, description) {

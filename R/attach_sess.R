@@ -11,6 +11,66 @@ vscode_r_prepare_sess <- function(pkg_path, managed_root, consent_dir,
     }
     runtime <- sess_runtime_identity()
     managed_library <- sess_managed_library(managed_root, expected)
+    # Ask the extension for a single-use installation grant. reason is
+    # "missing", "mismatch", or "dependencies".
+    request_consent <- function(reason) {
+        if (!dir.exists(consent_dir)) {
+            stop("The extension's sess consent service is unavailable. Restart VS Code and try again.")
+        }
+        new_id_part <- function() {
+            temporary <- basename(tempfile(pattern = "request-", tmpdir = consent_dir))
+            gsub("[^A-Za-z0-9_-]", "", sub("^request-", "", temporary))
+        }
+        id <- paste0(new_id_part(), new_id_part())
+        if (!grepl("^[A-Za-z0-9_-]{16,64}$", id)) {
+            stop("Could not create a unique sess installation request.")
+        }
+        request <- paste(
+                         "vscode-r-sess-consent-v1", id, expected, runtime, reason, sep = "\n")
+        request_path <- file.path(consent_dir, paste0(id, ".request"))
+        response_path <- file.path(consent_dir, paste0(id, ".response"))
+        temporary_path <- tempfile(pattern = paste0(id, "-"), tmpdir = consent_dir)
+        on.exit(unlink(c(temporary_path, request_path, response_path)), add = TRUE)
+        writeLines(request, temporary_path, useBytes = TRUE)
+        if (.Platform$OS.type == "unix") {
+            Sys.chmod(temporary_path, "0600")
+        }
+        if (!file.rename(temporary_path, request_path)) {
+            stop("Could not request permission to install bundled sess.")
+        }
+
+        deadline <- Sys.time() + timeout_seconds
+        response <- ""
+        while (Sys.time() < deadline && dir.exists(consent_dir) && !nzchar(response)) {
+            if (file.exists(response_path)) {
+                lines <- tryCatch(
+                                  readLines(response_path, warn = FALSE, n = 2L),
+                                  error = function(e) character())
+                if (length(lines) == 1L && lines %in% c("approve", "decline")) {
+                    response <- lines
+                } else {
+                    stop("Invalid response to the sess installation request.")
+                }
+            } else {
+                Sys.sleep(0.2)
+            }
+        }
+        response
+    }
+    configured_repo <- function() {
+        configured <- getOption("repos")
+        repo <- if ("CRAN" %in% names(configured)) {
+            configured[["CRAN"]]
+        } else if (length(configured)) {
+            configured[[1L]]
+        } else {
+            "https://cloud.r-project.org"
+        }
+        if (!length(repo) || is.na(repo) || !nzchar(repo) || identical(repo, "@CRAN@")) {
+            repo <- "https://cloud.r-project.org"
+        }
+        repo
+    }
 
     loaded <- "sess" %in% loadedNamespaces()
     if (loaded) {
@@ -74,8 +134,24 @@ vscode_r_prepare_sess <- function(pkg_path, managed_root, consent_dir,
                 error = function(e) character()
             )
             installed <- sess_find_source_library(expected, managed_library)
-            if (length(ready_revision) == 1L && identical(ready_revision, expected) &&
-                    !is.null(installed)) {
+            ready <- length(ready_revision) == 1L && identical(ready_revision, expected) &&
+                !is.null(installed)
+            missing_dependencies <- if (ready) sess_missing_dependencies(installed) else character()
+            if (ready && length(missing_dependencies)) {
+                # The managed copy is shared by every R with this platform and version.
+                # Dependencies an earlier setup found in its own libraries may be absent here.
+                message("The vscode-R managed sess needs R packages that this R cannot find: ",
+                        paste(missing_dependencies, collapse = ", "))
+                if (!identical(request_consent("dependencies"), "approve")) {
+                    message("The missing packages were not installed. The session watcher was not attached.")
+                    return(NULL)
+                }
+                installer <- new.env(parent = baseenv())
+                sys.source(installer_helper, envir = installer)
+                installer$sess_install_missing_dependencies(missing_dependencies, managed_library,
+                                                            configured_repo())
+                ns <- sess_load_namespace(installed, expected)
+            } else if (ready) {
                 ns <- sess_load_namespace(installed, expected)
             } else if (followed_setup) {
                 return(NULL)
@@ -88,48 +164,7 @@ vscode_r_prepare_sess <- function(pkg_path, managed_root, consent_dir,
                 } else {
                     "missing"
                 }
-                if (!dir.exists(consent_dir)) {
-                    stop("The extension's sess consent service is unavailable. Restart VS Code and try again.")
-                }
-                new_id_part <- function() {
-                    temporary <- basename(tempfile(pattern = "request-", tmpdir = consent_dir))
-                    gsub("[^A-Za-z0-9_-]", "", sub("^request-", "", temporary))
-                }
-                id <- paste0(new_id_part(), new_id_part())
-                if (!grepl("^[A-Za-z0-9_-]{16,64}$", id)) {
-                    stop("Could not create a unique sess installation request.")
-                }
-                request <- paste(
-                                 "vscode-r-sess-consent-v1", id, expected, runtime, reason, sep = "\n")
-                request_path <- file.path(consent_dir, paste0(id, ".request"))
-                response_path <- file.path(consent_dir, paste0(id, ".response"))
-                temporary_path <- tempfile(pattern = paste0(id, "-"), tmpdir = consent_dir)
-                on.exit(unlink(c(temporary_path, request_path, response_path)), add = TRUE)
-                writeLines(request, temporary_path, useBytes = TRUE)
-                if (.Platform$OS.type == "unix") {
-                    Sys.chmod(temporary_path, "0600")
-                }
-                if (!file.rename(temporary_path, request_path)) {
-                    stop("Could not request permission to install bundled sess.")
-                }
-
-                deadline <- Sys.time() + timeout_seconds
-                response <- ""
-                while (Sys.time() < deadline && dir.exists(consent_dir) && !nzchar(response)) {
-                    if (file.exists(response_path)) {
-                        lines <- tryCatch(
-                                          readLines(response_path, warn = FALSE, n = 2L),
-                                          error = function(e) character())
-                        if (length(lines) == 1L && lines %in% c("approve", "decline")) {
-                            response <- lines
-                        } else {
-                            stop("Invalid response to the sess installation request.")
-                        }
-                    } else {
-                        Sys.sleep(0.2)
-                    }
-                }
-                if (!identical(response, "approve")) {
+                if (!identical(request_consent(reason), "approve")) {
                     message("Bundled sess was not installed. The session watcher was not attached.")
                     return(NULL)
                 }
@@ -140,17 +175,7 @@ vscode_r_prepare_sess <- function(pkg_path, managed_root, consent_dir,
                         (length(ready_link) && !is.na(ready_link) && nzchar(ready_link))) {
                     stop("Could not clear the previous vscode-R managed sess completion marker.")
                 }
-                configured <- getOption("repos")
-                repo <- if ("CRAN" %in% names(configured)) {
-                    configured[["CRAN"]]
-                } else if (length(configured)) {
-                    configured[[1L]]
-                } else {
-                    "https://cloud.r-project.org"
-                }
-                if (!length(repo) || is.na(repo) || !nzchar(repo) || identical(repo, "@CRAN@")) {
-                    repo <- "https://cloud.r-project.org"
-                }
+                repo <- configured_repo()
                 dir.create(managed_library, recursive = TRUE, showWarnings = FALSE)
                 if (file.access(managed_library, 2L) != 0L) {
                     stop("The vscode-R managed sess library is not writable.")
